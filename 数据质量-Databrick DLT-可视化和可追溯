@@ -1,0 +1,277 @@
+在 Delta Live Tables (DLT) 中，可视化和可追溯性是两个重要特性，帮助用户了解数据管道的运行情况及数据变化的历史记录。以下是详细举例，展示如何实现和使用这些功能。
+
+1. 可视化：管道依赖和状态
+
+DLT 提供了 DAG（有向无环图） 的可视化界面，用来展示数据管道中各表的依赖关系和当前执行状态。
+
+示例：客户数据清洗管道
+
+假设我们构建了一个数据清洗管道，包含以下逻辑：
+
+1.raw_data：原始数据。
+
+2.filtered_data：过滤掉无效年龄的数据。
+
+3.final_data：去重并格式化后的最终数据。
+
+import dlt
+
+from pyspark.sql.functions import col
+
+
+
+@dlt.table
+
+def raw_data():
+
+    return spark.read.csv("dbfs:/path/to/raw_data.csv")
+
+
+
+@dlt.table
+
+@dlt.expect("valid_age", "age > 0 AND age < 120")
+
+def filtered_data():
+
+    return dlt.read("raw_data").filter(col("age").isNotNull())
+
+
+
+@dlt.table
+
+def final_data():
+
+    return dlt.read("filtered_data").dropDuplicates(["id"])
+
+DAG 可视化效果
+
+在 Databricks Workflows > Delta Live Tables 中：
+
+•管道会以 DAG 图的形式展示：
+
+raw_data ---> filtered_data ---> final_data
+•节点信息：
+
+•每个节点（表）显示运行状态（成功、失败等）。
+
+•输入/输出记录数，例如：
+
+•raw_data: 10,000 条。
+
+•filtered_data: 9,800 条（200 条被过滤）。
+
+•final_data: 9,700 条（100 条重复被删除）。
+
+2. 可追溯性：查看数据变化
+
+DLT 集成了 Delta Lake 的 Time Travel 功能，可以回溯表的历史版本，了解数据的变更。
+
+场景：客户数据更新
+
+•数据管理员需要追踪 final_data 表的变化情况。
+
+•某一次管道运行后，发现有部分数据被删除，需要定位问题原因。
+
+实现步骤
+
+1.回溯到特定版本
+
+使用 Delta Lake 的 DESCRIBE HISTORY 和 VERSION AS OF 功能。
+
+# 查看表的变更历史
+
+spark.sql("DESCRIBE HISTORY final_data").show()
+
+
+
+# 回溯到版本 3
+
+old_version = spark.read.format("delta").option("versionAsOf", 3).load("/path/to/final_data")
+
+输出结果示例：
+
++-------+-------------------+-----------+-----------------+---------------+
+
+|version|timestamp          |operation  |operationMetrics|user           |
+
++-------+-------------------+-----------+-----------------+---------------+
+
+|3      |2024-01-05 14:00:00|DELETE     |rowsRemoved=100  |admin_user     |
+
+|2      |2024-01-04 10:00:00|MERGE      |rowsUpdated=500  |pipeline_run   |
+
+|1      |2024-01-03 16:30:00|INSERT     |rowsAdded=9700   |pipeline_run   |
+
++-------+-------------------+-----------+-----------------+---------------+
+
+2.对比数据
+
+将旧版本与最新版本进行对比，分析问题：
+
+old_version = spark.read.format("delta").option("versionAsOf", 3).load("/path/to/final_data")
+
+current_version = spark.read.format("delta").load("/path/to/final_data")
+
+
+
+# 找出被删除的数据
+
+deleted_data = old_version.exceptAll(current_version)
+
+deleted_data.show()
+
+结果：
+
++----+--------+-----+
+
+| id | name   | age |
+
++----+--------+-----+
+
+| 102| John   | 130 |
+
+| 210| Invalid| -10 |
+
++----+--------+-----+
+
+3. 数据质量可视化报告
+
+DLT 的内置 expectations 功能生成实时的数据质量报告，帮助用户直观地了解数据是否符合预期。
+
+数据质量规则
+
+在 filtered_data 表中定义规则：
+
+@dlt.table
+
+@dlt.expect("valid_age", "age > 0 AND age < 120")
+
+@dlt.expect("non_null_name", "name IS NOT NULL")
+
+def filtered_data():
+
+    return dlt.read("raw_data").filter(col("age").isNotNull())
+
+质量报告界面
+
+在 Databricks Workflows 中查看 filtered_data 的数据质量报告：
+
+•规则通过率：
+
+•valid_age：98%（200 条记录因无效年龄被过滤）。
+
+•non_null_name：100%。
+
+•数据总览：
+
+•输入记录：10,000 条。
+
+•符合规则记录：9,800 条。
+
+•未通过记录：
+
+•条数：200 条。
+
+•示例记录：[{"id": 102, "name": "John", "age": 130}]。
+
+自动处理不合规数据
+
+对于未通过规则的数据，可以选择：
+
+•跳过：丢弃不合规数据（默认）。
+
+•单独存储：将不合规数据存储在异常表中供分析。
+
+@dlt.expect_or_fail("valid_email", "email LIKE '%@%'")
+
+@dlt.table
+
+def clean_data():
+
+    return dlt.read("raw_data")
+
+4. 实际业务场景示例
+
+场景：订单数据质量监控
+
+•需求：确保订单数据中 order_amount 大于 0 且订单状态为有效。
+
+•管道设计：
+
+•raw_orders：原始订单数据。
+
+•valid_orders：通过数据质量规则过滤后的订单。
+
+•error_records：存储不合规的订单。
+
+实现代码
+
+    
+@dlt.table
+
+def raw_orders():
+
+    return spark.read("dbfs:/path/to/orders.csv")
+
+
+
+@dlt.table
+
+@dlt.expect("valid_amount", "order_amount > 0")
+
+@dlt.expect("valid_status", "status IN ('completed', 'pending')")
+
+def valid_orders():
+
+    return dlt.read("raw_orders")
+
+
+
+@dlt.table
+
+def error_records():
+
+    return dlt.read("raw_orders").exceptAll(dlt.read("valid_orders"))    
+
+效果展示
+
+•DAG 图：
+
+raw_orders ---> valid_orders
+
+     |
+
+     ---> error_records
+
+•数据质量报告：
+
+•valid_amount：通过率 95%。
+
+•valid_status：通过率 98%。
+
+•未通过数据示例：
+
+•error_records 表中存储：
+
++----+----------+------------+--------+
+
+| id | customer | order_amount| status |
+
++----+----------+------------+--------+
+
+| 301| Alice    | -50        | pending|
+
+| 302| Bob      | 100        | invalid|
+
++----+----------+------------+--------+
+
+总结
+
+1.可视化：DLT 提供直观的 DAG 图，展示表之间的依赖关系和运行状态。
+
+2.可追溯性：通过 Delta Lake 的 Time Travel 功能，可以回溯数据变化历史并分析问题。
+
+3.质量报告：实时监控数据质量规则的执行结果，提供详细的通过率和异常数据报告。
+
+4.实际价值：这些功能帮助企业快速定位问题、保障数据质量并提高数据处理效率。
